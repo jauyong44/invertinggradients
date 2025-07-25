@@ -5,9 +5,11 @@ from collections import defaultdict, OrderedDict
 from inversefed.nn import MetaMonkey
 from .metrics import total_variation as TV
 from .metrics import InceptionScore
+from .metrics import reverse_total_variation as reverse_TV
+from.metrics import isotropic_total_variation as iso_TV
 from .medianfilt import MedianPool2d
 from copy import deepcopy
-
+import numpy as np
 import time
 
 DEFAULT_CONFIG = dict(signed=False,
@@ -20,10 +22,14 @@ DEFAULT_CONFIG = dict(signed=False,
                       restarts=1,
                       max_iterations=4800,
                       total_variation=1e-1,
+                      tv_min_value = 0,
+                      tv_scheduler_step= 0,
+                      tv_scaling_factor = 0.1,
                       init='randn',
                       filter='none',
                       lr_decay=True,
-                      scoring_choice='loss')
+                      scoring_choice='loss',
+                      regularization_choice='tv')
 
 def _label_to_onehot(target, num_classes=100):
     target = torch.unsqueeze(target, 1)
@@ -48,6 +54,7 @@ class GradientReconstructor():
         """Initialize with algorithm setup."""
         self.config = _validate_config(config)
         self.model = model
+        self.old_tv = config['total_variation']
         self.setup = dict(device=next(model.parameters()).device, dtype=next(model.parameters()).dtype)
 
         self.mean_std = mean_std
@@ -61,6 +68,7 @@ class GradientReconstructor():
 
     def reconstruct(self, input_data, labels, img_shape=(3, 32, 32), dryrun=False, eval=True, tol=None):
         """Reconstruct image from gradient."""
+        self
         start_time = time.time()
         if eval:
             self.model.eval()
@@ -107,14 +115,14 @@ class GradientReconstructor():
         if self.config['scoring_choice'] in ['pixelmean', 'pixelmedian']:
             x_optimal, stats = self._average_trials(x, labels, input_data, stats)
         else:
-            print('Choosing optimal result ...')
+            print('Choosing optimal result ...', flush=True)
             scores = scores[torch.isfinite(scores)]  # guard against NaN/-Inf scores?
             optimal_index = torch.argmin(scores)
-            print(f'Optimal result score: {scores[optimal_index]:2.4f}')
+            print(f'Optimal result score: {scores[optimal_index]:2.4f}', flush=True)
             stats['opt'] = scores[optimal_index].item()
             x_optimal = x[optimal_index]
 
-        print(f'Total time: {time.time()-start_time}.')
+        print(f'Total time: {time.time()-start_time}.', flush=True)
         return x_optimal.detach(), stats
 
     def _init_images(self, img_shape):
@@ -158,22 +166,27 @@ class GradientReconstructor():
                                                              milestones=[max_iterations // 2.667, max_iterations // 1.6,
 
                                                                          max_iterations // 1.142], gamma=0.1)   # 3/8 5/8 7/8
+        
         try:
-            for iteration in range(max_iterations):
+            for iteration in range(1, max_iterations+1):
                 closure = self._gradient_closure(optimizer, x_trial, input_data, labels)
                 rec_loss = optimizer.step(closure)
                 if self.config['lr_decay']:
                     scheduler.step()
-
+                if self.config['tv_scheduler_step'] and iteration % self.config['tv_scheduler_step'] == 0 and self.config['total_variation'] != self.config['tv_min_value']:
+                    self.config['total_variation'] *= self.config['tv_scaling_factor']
+                    if (self.config['tv_min_value']> self.config['total_variation']):
+                        self.config['total_variation'] = self.config['tv_min_value']
+                    print(f"Total variation is now: {self.config['total_variation']:2.4e}", flush=True)
                 with torch.no_grad():
                     # Project into image space
                     if self.config['boxed']:
                         x_trial.data = torch.max(torch.min(x_trial, (1 - dm) / ds), -dm / ds)
 
-                    if (iteration + 1 == max_iterations) or iteration % 500 == 0:
-                        print(f'It: {iteration}. Rec. loss: {rec_loss.item():2.4f}.')
+                    if (iteration == max_iterations) or iteration % 500 == 0:
+                        print(f'It: {iteration}. Rec. loss: {rec_loss.item():2.4f}.', flush=True)
 
-                    if (iteration + 1) % 500 == 0:
+                    if (iteration) % 500 == 0:
                         if self.config['filter'] == 'none':
                             pass
                         elif self.config['filter'] == 'median':
@@ -184,8 +197,9 @@ class GradientReconstructor():
                 if dryrun:
                     break
         except KeyboardInterrupt:
-            print(f'Recovery interrupted manually in iteration {iteration}!')
+            print(f'Recovery interrupted manually in iteration {iteration}!', flush=True)
             pass
+        self.config['total_variation'] = self.old_tv
         return x_trial.detach(), labels
 
     def _gradient_closure(self, optimizer, x_trial, input_gradient, label):
@@ -200,7 +214,18 @@ class GradientReconstructor():
                                             weights=self.config['weights'])
 
             if self.config['total_variation'] > 0:
-                rec_loss += self.config['total_variation'] * TV(x_trial)
+                if self.config['regularization_choice'] == 'tv':
+                    rec_loss += self.config['total_variation'] * TV(x_trial)
+                elif self.config['regularization_choice'] == 'reverse_direction_tv':
+                    rec_loss += self.config['total_variation'] * reverse_TV(x_trial)
+                elif self.config['regularization_choice'] == 'iso_tv':
+                    rec_loss += self.config['total_variation'] * iso_TV(x_trial)
+                elif self.config['regularization_choice'] == 'l1':
+                    rec_loss += self.config['total_variation'] * torch.mean(torch.abs(x_trial))
+                elif self.config['regularization_choice'] == 'elastic':
+                    rec_loss += self.config['total_variation'] * (torch.mean(torch.abs(x_trial)) + torch.mean(x_trial.pow(2)))
+                else: 
+                    rec_loss += self.config['total_variation'] * torch.mean(x_trial.pow(2))
             rec_loss.backward()
             if self.config['signed']:
                 x_trial.grad.sign_()
@@ -218,6 +243,10 @@ class GradientReconstructor():
                                         weights=self.config['weights'])
         elif self.config['scoring_choice'] == 'tv':
             return TV(x_trial)
+        elif self.config['scoring_choice'] == 'reverse_direction_tv':
+            return reverse_TV(x_trial)
+        elif self.config['scoring_choice'] == 'iso_tv':
+            return iso_TV(x_trial)
         elif self.config['scoring_choice'] == 'inception':
             # We do not care about diversity here!
             return self.inception(x_trial)
@@ -250,12 +279,13 @@ class GradientReconstructor():
 class FedAvgReconstructor(GradientReconstructor):
     """Reconstruct an image from weights after n gradient descent steps."""
 
-    def __init__(self, model, mean_std=(0.0, 1.0), local_steps=2, local_lr=1e-4,
+    def __init__(self, model, mean_std=(0.0, 1.0), epoches=2, local_lr=1e-4,
                  config=DEFAULT_CONFIG, num_images=1, use_updates=True, batch_size=0):
         """Initialize with model, (mean, std) and config."""
         super().__init__(model, mean_std, config, num_images)
-        self.local_steps = local_steps
+        self.epoches = epoches
         self.local_lr = local_lr
+        self.local_steps = epoches
         self.use_updates = use_updates
         self.batch_size = batch_size
 
@@ -264,7 +294,7 @@ class FedAvgReconstructor(GradientReconstructor):
             optimizer.zero_grad()
             self.model.zero_grad()
             parameters = loss_steps(self.model, x_trial, labels, loss_fn=self.loss_fn,
-                                    local_steps=self.local_steps, lr=self.local_lr,
+                                    epoches=self.epoches, lr=self.local_lr,
                                     use_updates=self.use_updates,
                                     batch_size=self.batch_size)
             rec_loss = reconstruction_costs([parameters], input_parameters,
@@ -272,7 +302,12 @@ class FedAvgReconstructor(GradientReconstructor):
                                             weights=self.config['weights'])
 
             if self.config['total_variation'] > 0:
-                rec_loss += self.config['total_variation'] * TV(x_trial)
+                if self.config['regularization_choice'] == 'reverse_direction_tv':
+                    rec_loss += self.config['total_variation'] * reverse_TV(x_trial)
+                elif self.config['regularization_choice'] == 'iso_tv':
+                    rec_loss += self.config['total_variation'] * iso_TV(x_trial)
+                else:
+                    rec_loss += self.config['total_variation'] * TV(x_trial)
             rec_loss.backward()
             if self.config['signed']:
                 x_trial.grad.sign_()
@@ -294,12 +329,16 @@ class FedAvgReconstructor(GradientReconstructor):
             return self.inception(x_trial)
 
 
-def loss_steps(model, inputs, labels, loss_fn=torch.nn.CrossEntropyLoss(), lr=1e-4, local_steps=4, use_updates=True, batch_size=0):
+def loss_steps(model, inputs, labels, loss_fn=torch.nn.CrossEntropyLoss(), lr=1e-4, epoches=0, local_steps = 2, use_updates=True, batch_size=0):
     """Take a few gradient descent steps to fit the model to the given input."""
     patched_model = MetaMonkey(model)
+    total_batch_runs = local_steps
     if use_updates:
         patched_model_origin = deepcopy(patched_model)
-    for i in range(local_steps):
+    num_batches_per_epoch = 1 if batch_size == 0 else ((inputs.shape[0] + batch_size - 1) // batch_size)
+    if (epoches !=0):
+        total_batch_runs = epoches* num_batches_per_epoch
+    for i in range(total_batch_runs):
         if batch_size == 0:
             outputs = patched_model(inputs, patched_model.parameters)
             labels_ = labels
@@ -390,3 +429,39 @@ def reconstruction_costs(gradients, input_gradient, cost_fn='l2', indices='def',
         # Accumulate final costs
         total_costs += costs
     return total_costs / len(gradients)
+
+def quantize_gradient(gradient, num_bits=8):
+    """
+    Performs scalar quantization on a gradient tensor.
+    """
+    grad_min = np.min(gradient)
+    grad_max = np.max(gradient)
+
+    if grad_min == grad_max:
+        quantized_gradient = np.zeros_like(gradient, dtype=np.uint8)
+        return quantized_gradient, grad_min, grad_max
+
+    scaled_gradient = (gradient - grad_min) / (grad_max - grad_min)
+    max_quantized_value = (1 << num_bits) - 1
+    quantized_gradient = np.round(scaled_gradient * max_quantized_value)
+    
+    if num_bits <= 8:
+        quantized_gradient = quantized_gradient.astype(np.uint8)
+    elif num_bits <= 16:
+        quantized_gradient = quantized_gradient.astype(np.uint16)
+    else:
+        quantized_gradient = quantized_gradient.astype(np.int32)
+
+    return quantized_gradient, grad_min, grad_max
+
+def dequantize_gradient(quantized_gradient, grad_min, grad_max, num_bits=8):
+    """
+    Performs dequantization on a quantized gradient tensor.
+    """
+    if grad_min == grad_max:
+        return np.full_like(quantized_gradient, grad_min, dtype=np.float32)
+
+    max_quantized_value = (1 << num_bits) - 1
+    scaled_gradient = quantized_gradient.astype(np.float32) / max_quantized_value
+    approximated_gradient = scaled_gradient * (grad_max - grad_min) + grad_min
+    return approximated_gradient.astype(np.float32)

@@ -145,6 +145,7 @@ if __name__ == "__main__":
                 filter="none",
                 lr_decay=True,
                 scoring_choice="loss",
+                regularization_choice=args.regularization_choice,
             )
         elif args.optim == "zhu":
             config = dict(
@@ -162,6 +163,7 @@ if __name__ == "__main__":
                 filter="none",
                 lr_decay=False,
                 scoring_choice=args.scoring_choice,
+                regularization_choice=args.regularization_choice,
             )
 
         rec_machine = inversefed.GradientReconstructor(model, (dm, ds), config, num_images=args.num_images)
