@@ -216,7 +216,7 @@ def _build_tinyimagenet(data_path, augmentations=True, normalize=True):
     and returns the Dataset objects.
     """
 
-    data_path = "/bsuhome/jonathanauyong/gradient/invertinggradients/inversefed/data/tinyimagenet/tiny-imagenet-200"
+    data_path = "gradient/invertinggradients/inversefed/data/tinyimagenet/tiny-imagenet-200"
 
     # Define base path and normalization constants
     base_path = Path(data_path)
