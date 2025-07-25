@@ -44,6 +44,8 @@ conda activate iv
 ```
 To run ImageNet experiments, you need to download ImageNet and provide its location [or use your own images and skip the ```inversefed.construct_dataloaders``` steps].
 
+To run TinyImageNet experiments, download TinyImageNet, extract it with this script: https://gist.github.com/moskomule/2e6a9a463f50447beca4e64ab4699ac4, and then put in the path in the build_tiny_imagenet method in gradient/invertinggradients/inversefed/data/data_processing.py
+
 
 ### Quick Start
 Usage examples can be found in the notebooks, for example the [ResNet-152, ImageNet](ResNet152%20-%20trained%20on%20ImageNet.ipynb) example.
