@@ -4,6 +4,7 @@
 import torch
 import torchvision
 import torchvision.transforms as transforms
+from pathlib import Path
 
 import os
 
@@ -11,12 +12,15 @@ from ..consts import *
 
 from .data import _build_bsds_sr, _build_bsds_dn
 from .loss import Classification, PSNR
+from torch.utils.data import DataLoader, TensorDataset, Dataset
+from torchvision import models, datasets
 
 
 def construct_dataloaders(dataset, defs, data_path='~/data', shuffle=True, normalize=True):
     """Return a dataloader with given dataset and augmentation, normalize data?."""
     path = os.path.expanduser(data_path)
-
+    if (defs.seed):
+        torch.manual_seed(defs.seed)
     if dataset == 'CIFAR10':
         trainset, validset = _build_cifar10(path, defs.augmentations, normalize)
         loss_fn = Classification()
@@ -31,6 +35,9 @@ def construct_dataloaders(dataset, defs, data_path='~/data', shuffle=True, norma
         loss_fn = Classification()
     elif dataset == 'ImageNet':
         trainset, validset = _build_imagenet(path, defs.augmentations, normalize)
+        loss_fn = Classification()
+    elif dataset == 'TinyImageNet':
+        trainset, validset = _build_tinyimagenet(path, defs.augmentations, normalize)
         loss_fn = Classification()
     elif dataset == 'BSDS-SR':
         trainset, validset = _build_bsds_sr(path, defs.augmentations, normalize, upscale_factor=3, RGB=True)
@@ -198,6 +205,51 @@ def _build_imagenet(data_path, augmentations=True, normalize=True):
     else:
         trainset.transform = transform
     validset.transform = transform
+
+    return trainset, validset
+
+def _build_tinyimagenet(data_path, augmentations=True, normalize=True):
+    """
+    Defines the Tiny ImageNet dataset with appropriate transforms.
+    
+    This function separates transforms for training and validation,
+    and returns the Dataset objects.
+    """
+
+    data_path = "/bsuhome/jonathanauyong/gradient/invertinggradients/inversefed/data/tinyimagenet/tiny-imagenet-200"
+
+    # Define base path and normalization constants
+    base_path = Path(data_path)
+    data_mean = [0.485, 0.456, 0.406]
+    data_std = [0.229, 0.224, 0.225]
+
+    # Create the transform for the validation set (no augmentations)
+    transform_val_list = [
+        transforms.ToTensor(),
+    ]
+    if normalize:
+        transform_val_list.append(transforms.Normalize(data_mean, data_std))
+    transform_val = transforms.Compose(transform_val_list)
+
+    # Create the transform for the training set
+    if augmentations:
+        # With augmentations
+        transform_train_list = [
+            transforms.Resize(64),
+            transforms.RandomCrop(64, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+        ]
+        if normalize:
+            transform_train_list.append(transforms.Normalize(data_mean, data_std))
+        transform_train = transforms.Compose(transform_train_list)
+    else:
+        # Without augmentations, use the same transform as validation
+        transform_train = transform_val
+
+    # Create the Dataset objects using ImageFolder
+    trainset = datasets.ImageFolder(base_path / 'train', transform=transform_train)
+    validset = datasets.ImageFolder(base_path / 'val', transform=transform_val)
 
     return trainset, validset
 
